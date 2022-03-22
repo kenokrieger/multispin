@@ -176,8 +176,7 @@ __global__ void update_strategies(const unsigned long long seed, const int rng_i
                                   const int nrows,
                                   const float precomputed_probabilities[][5],
                                   const INT2_T *__restrict__ checkerboard_agents,
-                                  INT2_T *__restrict__ traders)
-{
+                                  INT2_T *__restrict__ traders) {
     const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
     const unsigned tidx = threadIdx.x;
     const unsigned tidy = threadIdx.y;
@@ -202,9 +201,7 @@ __global__ void update_strategies(const unsigned long long seed, const int rng_i
 }
 
 
-void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j, const size_t pitch)
-{
-
+void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j, const size_t pitch) {
     float h_probabilities[2][5];
 
     for (int spin = 0; spin < 2; spin++) {
@@ -249,9 +246,9 @@ __device__ __forceinline__ T block_sum(T traders)
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename SUM_T>
-__global__ void getMagn_k(const long long n,
-                          const INT_T *__restrict__ traders,
-                          SUM_T *__restrict__ sum)
+__global__ void compute_magnetisation(const long long n,
+                                      const INT_T *__restrict__ traders,
+                                      SUM_T *__restrict__ sum)
 {
     // to be optimized
     const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
@@ -284,27 +281,26 @@ static void countSpins(const int redBlocks,
                        const size_t total_words,
                        const unsigned long long *d_black_tiles,
                        unsigned long long *d_sum,
-                       unsigned long long *bsum,
-                       unsigned long long *wsum)
-{
+                       unsigned long long *black_sum,
+                       unsigned long long *white_sum) {
     CHECK_CUDA(cudaMemset(d_sum, 0, 2 * sizeof(*d_sum)))
     // Only the pointer to the black tiles is needed, since it provides access
     // to all spins (d_spins).
     // see definition in kernel.cu:
     // 		d_black_tiles = d_spins;
     // 		d_white_tiles = d_spins + total_words / 2;
-    getMagn_k<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, d_sum);
-    CHECK_ERROR("getMagn_k")
+    compute_magnetisation<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, d_sum);
+    CHECK_ERROR("compute_magnetisation")
     CHECK_CUDA(cudaDeviceSynchronize())
 
-    bsum[0] = 0;
-    wsum[0] = 0;
+    black_sum[0] = 0;
+    white_sum[0] = 0;
 
     unsigned long long sum_h[2];
 
     CHECK_CUDA(cudaMemcpy(sum_h, d_sum, 2 * sizeof(*sum_h), cudaMemcpyDeviceToHost))
-    bsum[0] += sum_h[0];
-    wsum[0] += sum_h[1];
+    black_sum[0] += sum_h[0];
+    white_sum[0] += sum_h[1];
 }
 
 
@@ -347,7 +343,6 @@ __attribute__((unused)) static void dumpLattice(const long long iteration,
 }
 
 
-template<int SPIN_X_WORD>
 float update(int iteration,
              dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
              unsigned long long *d_black_tiles,
@@ -356,8 +351,7 @@ float update(int iteration,
              float *d_probabilities,
              unsigned long long spins_up,
              unsigned long long spins_down,
-             Parameters params)
-{
+             Parameters params) {
     countSpins(reduce_blocks, params.total_words, d_black_tiles, d_sum, &spins_up, &spins_down);
     double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
     float reduced_magnetisation = magnetisation / static_cast<double>(params.lattice_width * params.lattice_height);

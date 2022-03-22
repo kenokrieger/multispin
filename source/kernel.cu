@@ -157,7 +157,7 @@ int main(int argc, char **argv) {
     float global_market;
     CHECK_CUDA(cudaEventRecord(start, nullptr))
     for(iteration = 0; iteration < total_updates; iteration++) {
-        global_market = update<SPIN_X_WORD>(
+        global_market = update(
             iteration, blocks, threads_per_block, reduce_blocks,
             d_black_tiles, d_white_tiles, d_sum, d_probabilities,
             spins_up, spins_down, params
