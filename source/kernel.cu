@@ -23,7 +23,7 @@ using namespace std;
 #define FILE_ENTRY_LIMIT (1000000)
 
 
-map<string, string> read_config_file(const string& config_filename, const string& delimiter = "=") {
+map<string, string> readConfigFile(const string& config_filename, const string& delimiter = "=") {
     std::ifstream config_file;
     config_file.open(config_filename);
     map<string, string> config;
@@ -55,8 +55,8 @@ map<string, string> read_config_file(const string& config_filename, const string
 }
 
 
-void validate_grid(const long long lattice_width, const long long lattice_height,
-                   const int spin_x_word) {
+void validateGrid(const long long lattice_width, const long long lattice_height,
+                  const int spin_x_word) {
     if (!lattice_width || (lattice_width % 2) || ((lattice_width / 2) % (2 * spin_x_word * THREADS_X))) {
         fprintf(stderr, "\nPlease specify an lattice_width multiple of %d\n\n", 2 * spin_x_word * 2 * THREADS_X);
         exit(EXIT_FAILURE);
@@ -68,7 +68,7 @@ void validate_grid(const long long lattice_width, const long long lattice_height
 }
 
 
-cudaDeviceProp identify_gpu() {
+cudaDeviceProp identifyGpu() {
     cudaDeviceProp props{};
     CHECK_CUDA(cudaGetDeviceProperties(&props, 0))
     /*
@@ -87,9 +87,6 @@ int main(int argc, char **argv) {
     const int SPIN_X_WORD = (8 * sizeof(*d_spins)) / BIT_X_SPIN;
     unsigned long long *d_black_tiles;
     unsigned long long *d_white_tiles;
-
-    unsigned long long spins_up;
-    unsigned long long spins_down;
     unsigned long long *d_sum;
 
     cudaEvent_t start, stop;
@@ -99,7 +96,7 @@ int main(int argc, char **argv) {
     Parameters params;
 
     string config_filename = (argc == 1) ? "multising.conf" : argv[1];
-    map<string, string> config = read_config_file(config_filename);
+    map<string, string> config = readConfigFile(config_filename);
 
     params.lattice_height = std::stoll(config["lattice_height"]);
     params.lattice_width = std::stoll(config["lattice_width"]);
@@ -113,8 +110,8 @@ int main(int argc, char **argv) {
     params.reduced_alpha = -2.0f * beta * alpha;
     params.reduced_j = -2.0f * beta * j;
 
-    validate_grid(params.lattice_width, params.lattice_height, SPIN_X_WORD);
-    cudaDeviceProp props = identify_gpu();
+    validateGrid(params.lattice_width, params.lattice_height, SPIN_X_WORD);
+    cudaDeviceProp props = identifyGpu();
 
     params.words_per_row = (params.lattice_width / 2) / SPIN_X_WORD;
     params.total_words = 2ull * static_cast<size_t>(params.lattice_height) * params.words_per_row;
@@ -143,7 +140,7 @@ int main(int argc, char **argv) {
 
     // words_per_row / 2 because words two 64 bit words are compacted into
     // one 128 bit word
-    initialise_arrays<unsigned long long>(
+    initialiseArrays<unsigned long long>(
             blocks, threads_per_block,
             params.seed, params.words_per_row / 2,
             d_black_tiles, d_white_tiles, percentage_up
@@ -160,7 +157,7 @@ int main(int argc, char **argv) {
         global_market = update(
             iteration, blocks, threads_per_block, reduce_blocks,
             d_black_tiles, d_white_tiles, d_sum, d_probabilities,
-            spins_up, spins_down, params
+            params
         );
         mag_file << global_market << std::endl;
 

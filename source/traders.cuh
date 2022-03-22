@@ -12,6 +12,18 @@
 
 enum {C_BLACK, C_WHITE};
 
+/**
+ * @brief Contains the different parameters for the simulation
+ *
+ * @field seed The seed for the random number generator
+ * @field reduced_alpha - The parameter alpha multiplied by -2 times beta
+ * @field lattice_height - The desired height of the lattice
+ * @field lattice_width - The desired width of the lattice
+ * @field words_per_row - The number of computer words per row as a result of the chosen configuration
+ * @field total_words - The total number of words
+ * @field pitch - The pitch of the precomputed probabilities which is needed in the call to cudaMemcpy2D()
+ *
+ */
 typedef struct {
     unsigned long long seed;
     float reduced_alpha;
@@ -23,19 +35,32 @@ typedef struct {
     size_t pitch;
 } Parameters;
 
-
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 __device__ __forceinline__ unsigned long long int custom_popc(const unsigned long long int x) {return __popcll(x);}
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 __device__ __forceinline__ ulonglong2 custom_make_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
 
-
+/**
+ * @brief Initialise the entries in an array to random bits.
+ *
+ * Given the pointer to an array, randomly set every fourth bit of each array element to 0 or 1.
+ *
+ * @tparam BITXSPIN The number of bits allocated for each spin
+ * @tparam COLOR The color of the tiles contained in the array according to the checkerboard algorithm
+ * @tparam INT_T The type of the array elements
+ *
+ * @param seed The seed for the random number generator
+ * @param ncolumns Number of columns of the array
+ * @param agents The pointer to the array to initialise
+ * @param percentage The probability for assigning 1 to an element. Defaults to 0.5
+ *
+ */
 template<int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__  void initialise_traders(const unsigned long long seed,
-                                    const long long ncolumns,
-                                    INT2_T *__restrict__ traders,
-                                    float percentage = 0.5f) {
+__global__  void initialiseAgents(const unsigned long long seed,
+                                  const long long ncolumns,
+                                  INT2_T *__restrict__ agents,
+                                  float percentage = 0.5f) {
     const unsigned row = blockIdx.y * blockDim.y + threadIdx.y;
     const unsigned col = blockIdx.x * blockDim.x + threadIdx.x;
     const auto index = row * ncolumns + col;
@@ -44,40 +69,72 @@ __global__  void initialise_traders(const unsigned long long seed,
     curandStatePhilox4_32_10_t rng;
     curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * COLOR, &rng);
 
-    traders[index] = custom_make_int2(INT_T(0), INT_T(0));
+    agents[index] = custom_make_int2(INT_T(0), INT_T(0));
     for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
         // The two if clauses are not identical since curand_uniform()
         // returns a different number on each invocation
         if (curand_uniform(&rng) < percentage) {
-            traders[index].x |= INT_T(1) << spin_position;
+            agents[index].x |= INT_T(1) << spin_position;
         }
         if (curand_uniform(&rng) < percentage) {
-            traders[index].y |= INT_T(1) << spin_position;
+            agents[index].y |= INT_T(1) << spin_position;
         }
     }
 }
 
-
+/**
+ * @brief Initialise the entries in two arrays by calling initialiseAgents
+ *
+ * Given the pointer to two arrays, randomly set every fourth bit of each array element to 0 or 1.
+ *
+ * @tparam INT_T The type of the array elements
+ *
+ * @param blocks The number of blocks for the launch on the GPU
+ * @param threads_per_block The number of threads for the launch on the GPU
+ * @param seed The seed for the random number generator
+ * @param ncolumns The number of columns in each array
+ * @param d_black_tiles The pointer to the "black tiles" of the lattice according to the checkerboard algorithm
+ * @param d_white_tiles The pointer to the "white tiles" of the lattice according to the checkerboard algorithm
+ * @param percentage The percentage of spins to be initialised with 1
+ *
+ */
 template<typename INT_T, typename INT2_T>
-void initialise_arrays(dim3 blocks, dim3 threads_per_block,
-                       const unsigned long long seed, const unsigned long long ncolumns,
-                       INT2_T *__restrict__ d_black_tiles, INT2_T *__restrict__ d_white_tiles,
-                       float percentage = 0.5f) {
-    initialise_traders<BIT_X_SPIN, C_BLACK, INT_T><<<blocks, threads_per_block>>>(
+void initialiseArrays(dim3 blocks, dim3 threads_per_block,
+                      const unsigned long long seed, const unsigned long long ncolumns,
+                      INT2_T *__restrict__ d_black_tiles, INT2_T *__restrict__ d_white_tiles,
+                      float percentage = 0.5f) {
+    initialiseAgents<BIT_X_SPIN, C_BLACK, INT_T><<<blocks, threads_per_block>>>(
             seed, ncolumns, reinterpret_cast<ulonglong2 *>(d_black_tiles), percentage
     );
-    CHECK_ERROR("initialise_traders")
+    CHECK_ERROR("initialiseAgents")
 
-    initialise_traders<BIT_X_SPIN, C_WHITE, INT_T><<<blocks, threads_per_block>>>(
+    initialiseAgents<BIT_X_SPIN, C_WHITE, INT_T><<<blocks, threads_per_block>>>(
             seed, ncolumns, reinterpret_cast<ulonglong2 *>(d_white_tiles), percentage
     );
-    CHECK_ERROR("initialise_traders")
+    CHECK_ERROR("initialiseAgents")
 }
 
-
+/**
+ * @brief Loads a selection from an array into the shared memory of the GPU
+ *
+ * Given a pointer to a device array, load a fraction of the array defined by BLOCK_SIZE_X and
+ * BLOCK_SIZE_Y into the shared memory of the GPU. The array in the shared memory has size
+ * BLOCK_SIZE_X + 2 x BLOCK_SIZE_Y + 2 where the extra two rows/columns are used to take care of boundary
+ * conditions.
+ *
+ * @tparam BLOCK_SIZE_X The x dimension of the block which is loaded into shared memory
+ * @tparam BLOCK_SIZE_Y The y dimension of the block which is loaded into shared memory
+ * @tparam INT2_T The type of the array elements
+ *
+ * @param ncolumns The number of columns in the array to load in
+ * @param nrows The number of rows in the array to load in
+ * @param agents The pointer to the array to be loaded in
+ * @param tile The pointer to array located in the shared memory
+ *
+ */
 template<int BLOCK_SIZE_X, int BLOCK_SIZE_Y, typename INT2_T>
-__device__ void load_tiles(const int ncolumns, const int nrows,
-                           const INT2_T *__restrict__ traders, INT2_T tile[BLOCK_SIZE_Y + 2][BLOCK_SIZE_X + 2]) {
+__device__ void loadTiles(const int ncolumns, const int nrows,
+                          const INT2_T *__restrict__ agents, INT2_T tile[BLOCK_SIZE_Y + 2][BLOCK_SIZE_X + 2]) {
     const unsigned int tidx = threadIdx.x;
     const unsigned int tidy = threadIdx.y;
 
@@ -86,27 +143,33 @@ __device__ void load_tiles(const int ncolumns, const int nrows,
 
     int row = tile_start_y + tidy;
     int col = tile_start_x + tidx;
-    tile[1 + tidy][1 + tidx] = traders[row * ncolumns + col];
+    tile[1 + tidy][1 + tidx] = agents[row * ncolumns + col];
 
     if (tidy == 0) {
         row = (tile_start_y % nrows) == 0 ? nrows - 1 : tile_start_y - 1;
-        tile[0][1 + tidx] = traders[row * ncolumns + col];
+        tile[0][1 + tidx] = agents[row * ncolumns + col];
 
         row = (tile_start_y + BLOCK_SIZE_Y) % nrows;
-        tile[1 + BLOCK_SIZE_Y][1 + tidx] = traders[row * ncolumns + col];
+        tile[1 + BLOCK_SIZE_Y][1 + tidx] = agents[row * ncolumns + col];
 
         row = tile_start_y + tidx;
         col = (tile_start_x % ncolumns) == 0 ? ncolumns - 1 : tile_start_x - 1;
-        tile[1 + tidx][0] = traders[row * ncolumns + col];
+        tile[1 + tidx][0] = agents[row * ncolumns + col];
 
         row = tile_start_y + tidx;
         col = (tile_start_x + BLOCK_SIZE_X) % ncolumns;
-        tile[1 + tidx][1 + BLOCK_SIZE_X] = traders[row * ncolumns + col];
+        tile[1 + tidx][1 + BLOCK_SIZE_X] = agents[row * ncolumns + col];
     }
 }
 
-
-__device__ void load_probabilities(const float precomputed_probabilities[][5], float shared_probabilities[][5]) {
+/**
+ * @brief Loads an array of precomputed spin orientation possibilities into shared memory.
+ *
+ * @param precomputed_probabilities The pointer to the array of precomputed probabilities
+ * @param shared_probabilities The pointer to the array located in the shared memory of the GPU
+ *
+ */
+__device__ void loadProbabilities(const float precomputed_probabilities[][5], float shared_probabilities[][5]) {
     const unsigned tidx = threadIdx.x;
     const unsigned tidy = threadIdx.y;
     // load precomputed probabilities into shared memory.
@@ -120,10 +183,28 @@ __device__ void load_probabilities(const float precomputed_probabilities[][5], f
     }
 }
 
-
+/**
+ * @brief Compute the neighbour sum for a spin at a given position
+ *
+ * Given a spin position, locate the nearest neighbours of that spin as they are given in the Multispin coding
+ * approach and sum over them.
+ *
+ * @tparam BLOCK_DIMENSION_X The x dimension of the block
+ * @tparam BITXSPIN The number of bits allocated for each spin
+ * @tparam INT2_T The type of the array elements
+ *
+ * @param shared_tiles Pointer to the array containing the neighbours
+ * @param tidx X position of the spin(s)
+ * @param tidy Y position of the spin(s)
+ * @param shift_left Boolean specifying whether the nearest neighbours are obtained by bit shifting one neighbour to
+ *                     the left or right
+ *
+ * @returns The calculated neighbour sum stored bitwise in a computer word.
+ *
+ */
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T compute_neighbour_sum(INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
-                                        const int tidx, const int tidy, const int shift_left) {
+__device__ INT2_T computeNeighbourSum(INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
+                                      const int tidx, const int tidy, const int shift_left) {
     // three nearest neighbors
     INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
     INT2_T center_neighbor = shared_tiles[1 + tidy][1 + tidx];
@@ -147,9 +228,25 @@ __device__ INT2_T compute_neighbour_sum(INT2_T shared_tiles[][BLOCK_DIMENSION_X 
     return center_neighbor;
 }
 
-
+/**
+ * @brief Flip the spins stored in a computer word according to the system dynamics
+ *
+ * Update the spin orientation of a spins stored in a computer word according to its orientation
+ * probability
+ *
+ * @tparam BITXSPIN  The number of bits allocated for each spin
+ * @tparam INT2_T  The type of the array entries
+ *
+ * @param rng  The random number generator
+ * @param target  The spin(s) to update
+ * @param parallel_sum  The calculated neighbour sum
+ * @param  shared_probabilities  The pointer to the precomputed spin orientation probabilities stored in the shared
+ *                               memory
+ *
+ * @returns The array entry where the orientation of the individual spins has been updated
+ */
 template<int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][5]) {
+__device__ INT2_T flipSpins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][5]) {
     const auto ONE = static_cast<INT_T>(1);
     #pragma unroll
     for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
@@ -169,22 +266,43 @@ __device__ INT2_T flip_spins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2
     return target;
 }
 
-
+/**
+ * @brief Update all spins in a given array according to the system dynamics
+ *
+ * Update the spin orientation of a spins stored bitwise in an array by calculating their neighbour sum
+ * and changing their value according to precomputed probabilities
+ *
+ * @tparam BLOCK_DIMENSION_X  The x dimension of the block on the GPU
+ * @tparam BLOCK_DIMENSION_Y  The y dimension of the block on the GPU
+ * @tparam BITXSPIN  The number of bits allocated for each spin
+ * @tparam COLOR The color of the tiles contained in the array according to the checkerboard algorithm
+ * @tparam INT2_T  The type of the array entries
+ *
+ * @param seed  The seed for the random number generator
+ * @param rng_invocations  The number of previous calls to the random number generator
+ * @param ncolumns  The number of columns in the array
+ * @param nrows  The number of rows in the array
+ * @param precomputed_probabilities  The pointer to the array of precomputed probabilities stored in the shared
+ *                                   memory of the GPU
+ * @param checkerboard_agents  The pointer to the array containing the neighbour spins
+ * @param agents  The pointer to the array containing the spins to update
+ *
+ */
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
-__global__ void update_strategies(const unsigned long long seed, const int rng_invocations,
-                                  const int ncolumns,
-                                  const int nrows,
-                                  const float precomputed_probabilities[][5],
-                                  const INT2_T *__restrict__ checkerboard_agents,
-                                  INT2_T *__restrict__ traders) {
+__global__ void updateStrategies(const unsigned long long seed, const int rng_invocations,
+                                 const int ncolumns,
+                                 const int nrows,
+                                 const float precomputed_probabilities[][5],
+                                 const INT2_T *__restrict__ checkerboard_agents,
+                                 INT2_T *__restrict__ agents) {
     const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
     const unsigned tidx = threadIdx.x;
     const unsigned tidy = threadIdx.y;
     __shared__ INT2_T shared_tiles[BLOCK_DIMENSION_Y + 2][BLOCK_DIMENSION_X + 2];
-    load_tiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>(ncolumns, nrows,
-                                                             checkerboard_agents, shared_tiles);
+    loadTiles<BLOCK_DIMENSION_X, BLOCK_DIMENSION_Y, INT2_T>(ncolumns, nrows,
+                                                            checkerboard_agents, shared_tiles);
     __shared__ float shared_probabilities[2][5];
-    load_probabilities(precomputed_probabilities, shared_probabilities);
+    loadProbabilities(precomputed_probabilities, shared_probabilities);
     __syncthreads();
 
     int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
@@ -192,16 +310,25 @@ __global__ void update_strategies(const unsigned long long seed, const int rng_i
     const int shift_left = (COLOR == C_BLACK) == !(row % 2);
     const long long index = row * ncolumns + col;
     // compute neighbor sum
-    INT2_T parallel_sum = compute_neighbour_sum<BLOCK_DIMENSION_X, BITXSPIN, INT_T>(shared_tiles, tidx, tidy,
-                                                                                    shift_left);
+    INT2_T parallel_sum = computeNeighbourSum<BLOCK_DIMENSION_X, BITXSPIN, INT_T>(shared_tiles, tidx, tidy,
+                                                                                  shift_left);
     // flip spin according to neighbor sum and its own orientation
     curandStatePhilox4_32_10_t rng;
     curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * rng_invocations + COLOR), &rng);
-    traders[index] = flip_spins<BITXSPIN, INT_T>(rng, traders[index], parallel_sum, shared_probabilities);
+    agents[index] = flipSpins<BITXSPIN, INT_T>(rng, agents[index], parallel_sum, shared_probabilities);
 }
 
-
-void precompute_probabilities(float* probabilities, const float market_coupling, const float reduced_j, const size_t pitch) {
+/**
+ * @brief Precompute the possible spin orientation probabilities
+ *
+ * @param probabilities  The pointer to the array to be filled with the precomputed probabilities
+ * @param market_coupling  The second term in the local field multiplied by -2 times beta times alpha
+ *                         market_coupling = -2 * beta * alpha * relative magnetisation
+ * @param reduced_j  The parameter j multiplied by -2 times beta
+ * @param pitch  The pitch needed for the call to cudaMemcpy2D
+ *
+ */
+void precomputeProbabilities(float* probabilities, const float market_coupling, const float reduced_j, const size_t pitch) {
     float h_probabilities[2][5];
 
     for (int spin = 0; spin < 2; spin++) {
@@ -217,7 +344,7 @@ void precompute_probabilities(float* probabilities, const float market_coupling,
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 template<int BLOCK_DIMENSION_X, int WSIZE, typename T>
-__device__ __forceinline__ T block_sum(T traders)
+__device__ __forceinline__ T blockSum(T traders)
 {
     __shared__ T sh[BLOCK_DIMENSION_X / WSIZE];
 
@@ -246,9 +373,9 @@ __device__ __forceinline__ T block_sum(T traders)
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename SUM_T>
-__global__ void compute_magnetisation(const long long n,
-                                      const INT_T *__restrict__ traders,
-                                      SUM_T *__restrict__ sum)
+__global__ void computeMagnetisation(const long long n,
+                                     const INT_T *__restrict__ traders,
+                                     SUM_T *__restrict__ sum)
 {
     // to be optimized
     const int SPIN_X_WORD = 8 * sizeof(INT_T) / BITXSPIN;
@@ -266,8 +393,8 @@ __global__ void compute_magnetisation(const long long n,
             cntN += SPIN_X_WORD - c;
         }
     }
-    cntP = block_sum<BLOCK_DIMENSION_X, 32>(cntP);
-    cntN = block_sum<BLOCK_DIMENSION_X, 32>(cntN);
+    cntP = blockSum<BLOCK_DIMENSION_X, 32>(cntP);
+    cntN = blockSum<BLOCK_DIMENSION_X, 32>(cntN);
 
     if (threadIdx.x == 0) {
         atomicAdd(sum + 0, cntP);
@@ -289,8 +416,8 @@ static void countSpins(const int redBlocks,
     // see definition in kernel.cu:
     // 		d_black_tiles = d_spins;
     // 		d_white_tiles = d_spins + total_words / 2;
-    compute_magnetisation<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, d_sum);
-    CHECK_ERROR("compute_magnetisation")
+    computeMagnetisation<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, d_sum);
+    CHECK_ERROR("computeMagnetisation")
     CHECK_CUDA(cudaDeviceSynchronize())
 
     black_sum[0] = 0;
@@ -303,17 +430,26 @@ static void countSpins(const int redBlocks,
     white_sum[0] += sum_h[1];
 }
 
-
-__attribute__((unused)) static void dumpLattice(const long long iteration,
-                        const int rows,
-                        const size_t columns,
+/**
+ * @brief Save the current lattice state to a file
+ *
+ * @param iteration  The iteration at which the lattice state was produced
+ * @param nrows  The number of rows in the lattice
+ * @param ncolumns  The number of columns in the lattice
+ * @param total_number_of_words  The total number of computer words storing the lattice configuration
+ * @param d_spins  The pointer to the array storing the spins
+ *
+ */
+static void dumpLattice(const long long iteration,
+                        const int nrows,
+                        const size_t ncolumns,
                         const size_t total_number_of_words,
-                        const unsigned long long *v_d) {
+                        const unsigned long long *d_spins) {
 
     char filename[256];
 
     unsigned long long *v_h = (unsigned long long *) malloc(total_number_of_words * sizeof(*v_h));
-    CHECK_CUDA(cudaMemcpy(v_h, v_d, total_number_of_words * sizeof(*v_h), cudaMemcpyDeviceToHost))
+    CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h), cudaMemcpyDeviceToHost))
 
     unsigned long long *black_h = v_h;
     unsigned long long *white_h = v_h + total_number_of_words / 2;
@@ -321,10 +457,10 @@ __attribute__((unused)) static void dumpLattice(const long long iteration,
     snprintf(filename, sizeof(filename), "iteration_%lld.dat", iteration);
     FILE *fp = fopen(filename, "w");
 
-    for(int i = 0; i < rows; i++) {
-        for(int j = 0; j < columns; j++) {
-            unsigned long long b = black_h[i * columns + j];
-            unsigned long long w = white_h[i * columns + j];
+    for(int i = 0; i < nrows; i++) {
+        for(int j = 0; j < ncolumns; j++) {
+            unsigned long long b = black_h[i * ncolumns + j];
+            unsigned long long w = white_h[i * ncolumns + j];
 
             for(int k = 0; k < 8 * sizeof(*v_h); k += BIT_X_SPIN) {
                 if (i & 1) {
@@ -342,23 +478,40 @@ __attribute__((unused)) static void dumpLattice(const long long iteration,
     free(v_h);
 }
 
-
+/**
+ * @brief Perform one full lattice update
+ *
+ * Update the whole lattice by subsequently updating the "black" and "white" tiles of the lattice.
+ *
+ * @param iteration  The time of the current iteration
+ * @param blocks  The number of blocks to be launched on the GPU
+ * @param threads_per_block  The threads per block to be launched on the GPU
+ * @param reduce_blocks  The number of blocks to be used during the summation
+ * @param d_black_tiles  The pointer to the "black" tiles
+ * @param d_white_tiles  The pointer to the "white" tiles
+ * @param d_sum  The pointer to the array storing the sum over all spins
+ * @param d_probabilities  The pointer to the array that will be storing the probabilities
+ * @param params  A struct storing various simulation parameters.
+ *
+ * @return The relative magnetisation of the system
+ *
+ */
 float update(int iteration,
              dim3 blocks, dim3 threads_per_block, const int reduce_blocks,
              unsigned long long *d_black_tiles,
              unsigned long long *d_white_tiles,
              unsigned long long *d_sum,
              float *d_probabilities,
-             unsigned long long spins_up,
-             unsigned long long spins_down,
              Parameters params) {
+    unsigned long long spins_up;
+    unsigned long long spins_down;
     countSpins(reduce_blocks, params.total_words, d_black_tiles, d_sum, &spins_up, &spins_down);
     double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
     float reduced_magnetisation = magnetisation / static_cast<double>(params.lattice_width * params.lattice_height);
     float market_coupling = -params.reduced_alpha * fabs(reduced_magnetisation);
-    precompute_probabilities(d_probabilities, market_coupling, params.reduced_j, params.pitch);
+    precomputeProbabilities(d_probabilities, market_coupling, params.reduced_j, params.pitch);
 
-    update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
+    updateStrategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
     <<<blocks, threads_per_block>>>
             (params.seed, iteration + 1,
              params.words_per_row / 2,
@@ -367,7 +520,7 @@ float update(int iteration,
              reinterpret_cast<ulonglong2 *>(d_white_tiles),
              reinterpret_cast<ulonglong2 *>(d_black_tiles));
 
-    update_strategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
+    updateStrategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_WHITE, unsigned long long>
     <<<blocks, threads_per_block>>>
             (params.seed, iteration + 1,
              params.words_per_row / 2,
