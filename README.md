@@ -6,12 +6,12 @@ background information can be found at the
 
 ## Compiling
 
-This is a CLion Project. The easiest way to compile it, is by loading it
-into CLion. Since it only consists of three files, you may also try to compile
-it manually using the nvcc compiler.
+This is project was created using Jetbrain's CLion IDE. The easiest way to 
+compile it, is by loading it into CLion. Since it only consists of three
+files, you may also try to compile it manually using the nvcc compiler or
+CMake.
 
 ## Usage
-
 
 The program expects a file "multising.conf" in the directory it is called from.
 This file contains all the values for the simulation like grid size and parameters.
