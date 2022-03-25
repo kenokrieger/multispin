@@ -257,7 +257,7 @@ int main(int argc, char **argv) {
                     params.total_words, d_spins);
     }
     FILE *fp = fopen(config_filename, "a");
-    fprintf(fp, "final_iteration = %d ", iteration);
+    fprintf(fp, "final_iteration = %d\n", iteration);
     fclose(fp);
     CHECK_CUDA(cudaFree(d_spins))
     CHECK_CUDA(cudaFree(d_probabilities))
