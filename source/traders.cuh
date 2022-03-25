@@ -22,6 +22,7 @@ enum {C_BLACK, C_WHITE};
  * @field words_per_row - The number of computer words per row as a result of the chosen configuration
  * @field total_words - The total number of words
  * @field pitch - The pitch of the precomputed probabilities which is needed in the call to cudaMemcpy2D()
+ * @field rng_offset - An offset that can be passed to the random number generator to resume a simulation
  *
  */
 typedef struct {
@@ -33,13 +34,16 @@ typedef struct {
     size_t words_per_row;
     size_t total_words;
     size_t pitch;
+    size_t rng_offset;
 } Parameters;
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 __device__ __forceinline__ unsigned long long int custom_popc(const unsigned long long int x) {return __popcll(x);}
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
-__device__ __forceinline__ ulonglong2 custom_make_int2(const unsigned long long x, const unsigned long long y) {return make_ulonglong2(x, y);}
+__device__ __forceinline__ ulonglong2 custom_make_int2(const unsigned long long x, const unsigned long long y) {
+    return make_ulonglong2(x, y);
+}
 
 /**
  * @brief Initialise the entries in an array to random bits.
@@ -246,12 +250,14 @@ __device__ INT2_T computeNeighbourSum(INT2_T shared_tiles[][BLOCK_DIMENSION_X + 
  * @returns The array entry where the orientation of the individual spins has been updated
  */
 template<int BITXSPIN, typename INT_T, typename INT2_T>
-__device__ INT2_T flipSpins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum, const float shared_probabilities[][5]) {
+__device__ INT2_T flipSpins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_T parallel_sum,
+                            const float shared_probabilities[][5]) {
     const auto ONE = static_cast<INT_T>(1);
     #pragma unroll
     for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
         const int2 spin = make_int2((target.x >> spin_position) & 0xF, (target.y >> spin_position) & 0xF);
-        const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0xF, (parallel_sum.y >> spin_position) & 0xF);
+        const int2 sum = make_int2((parallel_sum.x >> spin_position) & 0xF,
+                                   (parallel_sum.y >> spin_position) & 0xF);
 
         if (curand_uniform(&rng) <= shared_probabilities[spin.x][sum.x])
             target.x |= (ONE << spin_position);
@@ -290,8 +296,8 @@ __device__ INT2_T flipSpins(curandStatePhilox4_32_10_t rng, INT2_T target, INT2_
  */
 template<int BLOCK_DIMENSION_X, int BLOCK_DIMENSION_Y, int BITXSPIN, int COLOR, typename INT_T, typename INT2_T>
 __global__ void updateStrategies(const unsigned long long seed, const int rng_invocations,
-                                 const int ncolumns,
-                                 const int nrows,
+                                 const size_t ncolumns,
+                                 const size_t nrows,
                                  const float precomputed_probabilities[][5],
                                  const INT2_T *__restrict__ checkerboard_agents,
                                  INT2_T *__restrict__ agents) {
@@ -308,13 +314,14 @@ __global__ void updateStrategies(const unsigned long long seed, const int rng_in
     int row = blockIdx.y * BLOCK_DIMENSION_Y + tidy;
     int col = blockIdx.x * BLOCK_DIMENSION_X + tidx;
     const int shift_left = (COLOR == C_BLACK) == !(row % 2);
-    const long long index = row * ncolumns + col;
+    const size_t index = row * ncolumns + col;
     // compute neighbor sum
     INT2_T parallel_sum = computeNeighbourSum<BLOCK_DIMENSION_X, BITXSPIN, INT_T>(shared_tiles, tidx, tidy,
                                                                                   shift_left);
     // flip spin according to neighbor sum and its own orientation
     curandStatePhilox4_32_10_t rng;
-    curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * rng_invocations + COLOR), &rng);
+    curand_init(seed, index, static_cast<long long>(2 * SPIN_X_WORD) * (2 * rng_invocations + COLOR),
+                &rng);
     agents[index] = flipSpins<BITXSPIN, INT_T>(rng, agents[index], parallel_sum, shared_probabilities);
 }
 
@@ -338,7 +345,8 @@ void precomputeProbabilities(float* probabilities, const float market_coupling, 
             h_probabilities[spin][idx] = 1.0 / (1.0 + exp(field));
         }
     }
-    CHECK_CUDA(cudaMemcpy2D(probabilities, 5 * sizeof(*h_probabilities), &h_probabilities, pitch, 5 * sizeof(*h_probabilities), 2, cudaMemcpyHostToDevice))
+    CHECK_CUDA(cudaMemcpy2D(probabilities, 5 * sizeof(*h_probabilities), &h_probabilities, pitch,
+                            5 * sizeof(*h_probabilities), 2, cudaMemcpyHostToDevice))
 }
 
 
@@ -373,7 +381,7 @@ __device__ __forceinline__ T blockSum(T traders)
 
 // Copyright (c) 2019, NVIDIA CORPORATION. Mauro Bisson <maurob@nvidia.com>. All rights reserved.
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename SUM_T>
-__global__ void computeMagnetisation(const long long n,
+__global__ void computeMagnetisation(const size_t n,
                                      const INT_T *__restrict__ traders,
                                      SUM_T *__restrict__ sum)
 {
@@ -416,7 +424,9 @@ static void countSpins(const int redBlocks,
     // see definition in kernel.cu:
     // 		d_black_tiles = d_spins;
     // 		d_white_tiles = d_spins + total_words / 2;
-    computeMagnetisation<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(total_words, d_black_tiles, d_sum);
+    computeMagnetisation<THREADS, BIT_X_SPIN><<<redBlocks, THREADS>>>(
+            total_words, d_black_tiles, d_sum
+    );
     CHECK_ERROR("computeMagnetisation")
     CHECK_CUDA(cudaDeviceSynchronize())
 
@@ -431,30 +441,84 @@ static void countSpins(const int redBlocks,
 }
 
 /**
+ * @brief Read an existing lattice state from a file.
+ *
+ * @param d_spins  A pointer to the device array of spins to read in from the file
+ * @param filename  The name of the file containing the lattice state
+ * @param nrows  The number of rows in the lattice configuration
+ * @param ncolumns  The number of columns in the lattice configuration
+ * @param total_number_of_words  The total number of computer words storing the lattice configuration
+ *
+ */
+void readFromFile(unsigned long long* d_spins,
+                  const char* filename,
+                  const size_t nrows,
+                  const size_t ncolumns,
+                  const size_t total_number_of_words) {
+    auto ONE = static_cast<unsigned long long>(1);
+
+    unsigned long long *h_spins = (unsigned long long *) malloc(total_number_of_words * sizeof(*h_spins));
+    memset(h_spins, 0, total_number_of_words * sizeof(*h_spins));
+
+    unsigned long long *h_black_tiles = h_spins;
+    unsigned long long *h_white_tiles = h_spins + total_number_of_words / 2;
+
+    FILE *fp;
+    char buff[255];
+
+    fp = fopen(filename, "r");
+
+    for(int i = 0; i < nrows; i++) {
+        for(int j = 0; j < ncolumns; j++) {
+            for(int k = 0; k < 8 * sizeof(*h_spins); k += BIT_X_SPIN) {
+                if (i & 1) {
+                    fscanf(fp, "%s", buff);
+                    if (std::atoi(buff))
+                        h_white_tiles[i * ncolumns + j] |= ONE << k;
+                    fscanf(fp, "%s", buff);
+                    if (std::atoi(buff))
+                        h_black_tiles[i * ncolumns + j] |= ONE << k;
+                } else {
+                    fscanf(fp, "%s", buff);
+                    if (std::atoi(buff))
+                        h_black_tiles[i * ncolumns + j] |= ONE << k;
+                    fscanf(fp, "%s", buff);
+                    if (std::atoi(buff))
+                        h_white_tiles[i * ncolumns + j] |= ONE << k;
+                }
+            }
+        }
+    }
+    fclose(fp);
+    CHECK_CUDA(cudaMemcpy(d_spins, h_spins, total_number_of_words * sizeof(*h_spins),
+                          cudaMemcpyHostToDevice));
+    free(h_spins);
+}
+
+
+/**
  * @brief Save the current lattice state to a file
  *
- * @param iteration  The iteration at which the lattice state was produced
+ * @param filename  The name of the file to save the lattice to
  * @param nrows  The number of rows in the lattice
  * @param ncolumns  The number of columns in the lattice
  * @param total_number_of_words  The total number of computer words storing the lattice configuration
  * @param d_spins  The pointer to the array storing the spins
  *
  */
-static void dumpLattice(const long long iteration,
+static void dumpLattice(const char* filename,
                         const int nrows,
                         const size_t ncolumns,
                         const size_t total_number_of_words,
                         const unsigned long long *d_spins) {
 
-    char filename[256];
-
     unsigned long long *v_h = (unsigned long long *) malloc(total_number_of_words * sizeof(*v_h));
-    CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h), cudaMemcpyDeviceToHost))
+    CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h),
+                          cudaMemcpyDeviceToHost));
 
     unsigned long long *black_h = v_h;
     unsigned long long *white_h = v_h + total_number_of_words / 2;
 
-    snprintf(filename, sizeof(filename), "iteration_%lld.dat", iteration);
     FILE *fp = fopen(filename, "w");
 
     for(int i = 0; i < nrows; i++) {
@@ -477,6 +541,7 @@ static void dumpLattice(const long long iteration,
     fclose(fp);
     free(v_h);
 }
+
 
 /**
  * @brief Perform one full lattice update

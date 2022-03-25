@@ -1,15 +1,14 @@
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
 #include <cstdio>
 #include <string>
 #include <iostream>
 #include <fstream>
 #include <map>
+#include <csignal>
 
 #include "cudamacro.h"
 #include "traders.cuh"
 
-using namespace std;
+using std::string;
 
 #define DIV_UP(a,b)  (((a) + ((b) - 1)) / (b))
 #define MIN(a,b)	(((a) < (b)) ? (a) : (b))
@@ -23,10 +22,44 @@ using namespace std;
 #define FILE_ENTRY_LIMIT (1000000)
 
 
-map<string, string> readConfigFile(const string& config_filename, const string& delimiter = "=") {
+// trim from left
+inline string& ltrim(string& s, const char* t = " \t\n\r\f\v") {
+    s.erase(0, s.find_first_not_of(t));
+    return s;
+}
+
+// trim from right
+inline string& rtrim(string& s, const char* t = " \t\n\r\f\v") {
+    s.erase(s.find_last_not_of(t) + 1);
+    return s;
+}
+
+// trim from left & right
+inline string& trim(string& s, const char* t = " \t\n\r\f\v") {
+    return ltrim(rtrim(s, t), t);
+}
+
+volatile sig_atomic_t flag_terminate = 0;
+void sigint(int sig) {  // can be called asynchronously
+    flag_terminate = 1; // set flag
+}
+
+
+/**
+ * @brief Read in the simulation details from a configuration file
+ *
+ * Numerous parameters need to be passed to the simulation via a configuration file in which fields and values
+ * are separated by an equal sign.
+ *
+ * @param config_filename  The name of the configuration file
+ * @param delimiter  The delimiter, or "assigment operator", for fields and values. Defaults to "="
+ * @return  A map containing the fields and values read from the configuration file
+ *
+ */
+std::map<string, string> readConfigFile(const char* config_filename, const string& delimiter = "=") {
     std::ifstream config_file;
     config_file.open(config_filename);
-    map<string, string> config;
+    std::map<string, string> config;
 
     if (!config_file.is_open()) {
         std::cout << "Could not open config file '" << config_filename << "'" << std::endl;
@@ -34,8 +67,8 @@ map<string, string> readConfigFile(const string& config_filename, const string& 
     }
 
     int row = 0;
-    std::string line;
-    std::string key;
+    string line;
+    string key;
 
     while (getline(config_file, line)) {
         if (line[0] == '#' || line.empty()) continue;
@@ -45,7 +78,7 @@ map<string, string> readConfigFile(const string& config_filename, const string& 
             if (line[idx] != ' ') key += line[idx];
         }
 
-        std::string value = line.substr(delimiter_position + 1, line.length() - 1);
+        string value = line.substr(delimiter_position + 1, line.length() - 1);
         config[key] = value;
         row++;
         key = "";
@@ -58,7 +91,8 @@ map<string, string> readConfigFile(const string& config_filename, const string& 
 void validateGrid(const long long lattice_width, const long long lattice_height,
                   const int spin_x_word) {
     if (!lattice_width || (lattice_width % 2) || ((lattice_width / 2) % (2 * spin_x_word * THREADS_X))) {
-        fprintf(stderr, "\nPlease specify an lattice_width multiple of %d\n\n", 2 * spin_x_word * 2 * THREADS_X);
+        fprintf(stderr, "\nPlease specify an lattice_width multiple of %d\n\n",
+                2 * spin_x_word * 2 * THREADS_X);
         exit(EXIT_FAILURE);
     }
     if (!lattice_height || (lattice_height % (THREADS_Y))) {
@@ -89,14 +123,19 @@ int main(int argc, char **argv) {
     unsigned long long *d_white_tiles;
     unsigned long long *d_sum;
 
+    string import_file;
+    string export_file;
+    bool read_from_file = false;
+    bool dump_to_file = false;
+
     cudaEvent_t start, stop;
     float elapsed_time;
 
     std::ofstream mag_file;
     Parameters params;
 
-    string config_filename = (argc == 1) ? "multising.conf" : argv[1];
-    map<string, string> config = readConfigFile(config_filename);
+    const char *config_filename = (argc == 1) ? "multising.conf" : argv[1];
+    std::map<string, string> config = readConfigFile(config_filename);
 
     params.lattice_height = std::stoll(config["lattice_height"]);
     params.lattice_width = std::stoll(config["lattice_width"]);
@@ -106,6 +145,23 @@ int main(int argc, char **argv) {
     float j = std::stof(config["j"]);
     float beta = std::stof(config["beta"]);
     float percentage_up = std::stof(config["init_up"]);
+
+    if (config.count("rng_offset")) {
+        params.rng_offset = std::stoull(config["rng_offset"]);
+    } else {
+        params.rng_offset = 0;
+    }
+    if (config.count("import")) {
+        import_file = config["import"];
+        trim(import_file);
+        read_from_file = true;
+        std::cout << "Using existing lattice state from file: " << import_file << std::endl;
+    }
+    if (config.count("export")) {
+        export_file = config["export"];
+        trim(export_file);
+        dump_to_file = true;
+    }
 
     params.reduced_alpha = -2.0f * beta * alpha;
     params.reduced_j = -2.0f * beta * j;
@@ -138,13 +194,20 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaEventCreate(&start))
     CHECK_CUDA(cudaEventCreate(&stop))
 
-    // words_per_row / 2 because words two 64 bit words are compacted into
-    // one 128 bit word
-    initialiseArrays<unsigned long long>(
-            blocks, threads_per_block,
-            params.seed, params.words_per_row / 2,
-            d_black_tiles, d_white_tiles, percentage_up
-    );
+    if (read_from_file) {
+        std::cout << "Reading in lattice configuration..." << std::endl;
+        readFromFile(d_spins, import_file.c_str(), params.lattice_height,
+                     params.words_per_row, params.total_words);
+    } else {
+        // words_per_row / 2 because words two 64 bit words are compacted into
+        // one 128 bit word
+        std::cout << "Initialising random lattice state..." << std::endl;
+        initialiseArrays<unsigned long long>(
+                blocks, threads_per_block,
+                params.seed, params.words_per_row / 2,
+                d_black_tiles, d_white_tiles, percentage_up
+        );
+    }
 
     CHECK_CUDA(cudaSetDevice(0))
     CHECK_CUDA(cudaDeviceSynchronize())
@@ -152,12 +215,13 @@ int main(int argc, char **argv) {
     mag_file.open("magnetisation_0.dat");
     int iteration;
     float global_market;
+    signal(SIGINT, sigint);
     CHECK_CUDA(cudaEventRecord(start, nullptr))
     for(iteration = 0; iteration < total_updates; iteration++) {
         global_market = update(
-            iteration, blocks, threads_per_block, reduce_blocks,
-            d_black_tiles, d_white_tiles, d_sum, d_probabilities,
-            params
+                iteration + params.rng_offset, blocks, threads_per_block, reduce_blocks,
+                d_black_tiles, d_white_tiles, d_sum, d_probabilities,
+                params
         );
         mag_file << global_market << std::endl;
 
@@ -167,9 +231,16 @@ int main(int argc, char **argv) {
             mag_file.open("magnetisation_" + std::to_string(iteration) + ".dat");
         }
 
-        //if (iteration % 50 == 0)
-        //   dumpLattice(iteration, params.lattice_height, params.words_per_row,
+        // if (iteration % 50 == 0) {
+        // char fname[256];
+        // snprintf(fname, sizeof(fname), "iteration_%lld.dat", iteration);
+        //   dumpLattice(fname, params.lattice_height, params.words_per_row,
         //              params.total_words, d_spins);
+        // }
+        if (flag_terminate) {
+            std::cout << "Received keyboard interrupt, exiting..." << std::endl;
+            break;
+        }
     }
     mag_file.close();
     CHECK_CUDA(cudaEventRecord(stop, nullptr))
@@ -180,6 +251,14 @@ int main(int argc, char **argv) {
     std::cout << "Beta: " << beta << std::endl;
     std::cout << "Computation time: " << elapsed_time * 1.0E-3 << "s" << std::endl;
     std::cout << "Updates per ns: " << spin_updates_per_nanosecond << std::endl;
+    if (dump_to_file) {
+        std::cout << "Saving lattice state for reuse..." << std::endl;
+        dumpLattice(export_file.c_str(), params.lattice_height, params.words_per_row,
+                    params.total_words, d_spins);
+    }
+    FILE *fp = fopen(config_filename, "a");
+    fprintf(fp, "final_iteration = %d ", iteration);
+    fclose(fp);
     CHECK_CUDA(cudaFree(d_spins))
     CHECK_CUDA(cudaFree(d_probabilities))
     CHECK_CUDA(cudaFree(d_sum))
