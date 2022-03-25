@@ -28,10 +28,13 @@ alpha = 15.0
 j = 1.0
 beta = 0.6
 init_up = 0.5
+rng_offset = 0
+import = initial_state.dat
+export = final_state.dat
 ```
 
-The parameter **grid_depth** is only needed for 3 dimensional lattices.
-For **alpha = 0** this model resembles the standard Ising model.
+For **alpha = 0** this model resembles the standard Ising model. The fields
+**rng_offset** and **import** can be used to continue a simulation.
 
 ## License
 
