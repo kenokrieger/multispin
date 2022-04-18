@@ -1,3 +1,34 @@
+/* Program to simulate the Bornholdt Ising Model (https://arxiv.org/pdf/cond-mat/0105224.pdf)
+ *
+ * The program reads in a configuration file "multising.conf" or first command line parameter. The
+ * configuration file contains the parameter choice for the simulation.
+ *
+ * Example configuration file:
+ *
+ * lattice_height = 8192           # Lattice size
+ * lattice_width = 8192            # Lattice size
+ * total_updates = 10000           # Number of iterations to perform
+ * seed = 1591361                  # Seed for the simulation
+ * alpha = 128.00                  # Parameter of the model (coupling strength to the magnetisation)
+ * j = 1.0                         # Parameter of the model (coupling strength to the neighbours)
+ * beta = 1.0                      # Parameter of the model (pseudo-temperature)
+ * init_up = 0.5                   # Percentage of spins initially pointing up
+ * rng_offset = 124837             # Used to resume the simulation at given time point in combination with import (optional)
+ * import = iteration_124837.dat   # Used to resume simulation with given state in file (optional)
+ * export = final_state.dat        # Save the final configuration to file with specified name (optional)
+ *
+ * By default, the relative magnetisation will be saved in a file magnetisation_*.dat where a new file every
+ * FILE_ENTRY_LIMIT (1e6) iterations will be created.
+ * To save the lattice configuration edit the if clause in the main update loop.
+ *
+ * At the end of the simulation an additional line will be added to the configuration file denoting the
+ * reached number of iterations.
+ *
+ * final_iteration = 10000
+ *
+ * This can be used together with the exported final_state to resume the simulation.
+ *
+ */
 #include <cstdio>
 #include <string>
 #include <iostream>
@@ -8,6 +39,8 @@
 #include "cudamacro.h"
 #include "traders.cuh"
 
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "OCDFAInspection"
 using std::string;
 
 #define DIV_UP(a,b)  (((a) + ((b) - 1)) / (b))
@@ -212,31 +245,31 @@ int main(int argc, char **argv) {
     CHECK_CUDA(cudaSetDevice(0))
     CHECK_CUDA(cudaDeviceSynchronize())
 
-    mag_file.open("magnetisation_0.dat");
+    mag_file.open("magnetisation_" + std::to_string(params.rng_offset) + ".dat");
     int iteration;
-    float global_market;
+    float relative_magnetisation;
     signal(SIGINT, sigint);
     CHECK_CUDA(cudaEventRecord(start, nullptr))
-    for(iteration = 0; iteration < total_updates; iteration++) {
-        global_market = update(
-                iteration + params.rng_offset, blocks, threads_per_block, reduce_blocks,
+    for(iteration = params.rng_offset; iteration < total_updates; iteration++) {
+        relative_magnetisation = update(
+                iteration, blocks, threads_per_block, reduce_blocks,
                 d_black_tiles, d_white_tiles, d_sum, d_probabilities,
                 params
         );
-        mag_file << global_market << std::endl;
+        mag_file << relative_magnetisation << std::endl;
 
         // create a new file every FILE_ENTRY_LIMIT iterations
-        if (iteration % FILE_ENTRY_LIMIT == 0 && (iteration)) {
+        if (iteration % FILE_ENTRY_LIMIT == 0 && iteration) {
             mag_file.close();
             mag_file.open("magnetisation_" + std::to_string(iteration) + ".dat");
         }
 
-        // if (iteration % 50 == 0) {
-        // char fname[256];
-        // snprintf(fname, sizeof(fname), "iteration_%lld.dat", iteration);
-        //   dumpLattice(fname, params.lattice_height, params.words_per_row,
-        //              params.total_words, d_spins);
-        // }
+        if (iteration % 10000000 == 0 && iteration) {
+            char fname[256];
+            snprintf(fname, sizeof(fname), "iteration_%d.dat", iteration);
+            dumpLattice(fname, params.lattice_height, params.words_per_row,
+                        params.total_words, d_spins);
+        }
         if (flag_terminate) {
             std::cout << "Received keyboard interrupt, exiting..." << std::endl;
             break;
@@ -248,7 +281,6 @@ int main(int argc, char **argv) {
 
     CHECK_CUDA(cudaEventElapsedTime(&elapsed_time, start, stop))
     double spin_updates_per_nanosecond = static_cast<double>(params.total_words * SPIN_X_WORD) * iteration / (elapsed_time * 1.0E+6);
-    std::cout << "Beta: " << beta << std::endl;
     std::cout << "Computation time: " << elapsed_time * 1.0E-3 << "s" << std::endl;
     std::cout << "Updates per ns: " << spin_updates_per_nanosecond << std::endl;
     if (dump_to_file) {

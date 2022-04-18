@@ -75,8 +75,7 @@ __global__  void initialiseAgents(const unsigned long long seed,
 
     agents[index] = custom_make_int2(INT_T(0), INT_T(0));
     for(int spin_position = 0; spin_position < 8 * sizeof(INT_T); spin_position += BITXSPIN) {
-        // The two if clauses are not identical since curand_uniform()
-        // returns a different number on each invocation
+        // Initialise x and y component with random spins
         if (curand_uniform(&rng) < percentage) {
             agents[index].x |= INT_T(1) << spin_position;
         }
@@ -125,6 +124,26 @@ void initialiseArrays(dim3 blocks, dim3 threads_per_block,
  * BLOCK_SIZE_Y into the shared memory of the GPU. The array in the shared memory has size
  * BLOCK_SIZE_X + 2 x BLOCK_SIZE_Y + 2 where the extra two rows/columns are used to take care of boundary
  * conditions.
+ *
+ * Example:
+ *
+ * Source lattice [11 x 16]                             Imported tile [6 x 6]
+ *                   # # # # # # # # <- Tile Border       1 0 1 0 1 0   <- extra rows and columns to take
+ * 1 0 0 0 1 0 1 1 0 # 0 1 1 0 1 0 #                    0 0 1 1 0 1 0 1    care of boundary conditions
+ * 0 1 0 0 1 0 0 1 0 # 1 0 1 0 0 1 #                    0 1 0 1 0 0 1 0
+ * 0 0 1 0 1 0 1 0 1 # 1 0 1 0 0 1 #                    1 1 0 1 0 0 1 0
+ * 1 1 1 0 0 1 0 1 1 # 0 0 1 0 1 0 #                    1 0 0 1 0 1 0 1
+ * 1 0 0 1 1 0 1 0 1 # 1 1 1 0 1 0 #                    1 1 1 1 0 1 0 1
+ * 1 1 1 0 1 0 1 1 0 # 0 1 1 0 1 1 #                    0 0 1 1 0 1 1 1
+ * 1 1 0 1 0 1 0 0 0 # # # # # # # #                      1 0 1 1 1 1
+ * 0 1 0 1 1 0 0 1 1 0 1 0 1 1 1 1
+ * 0 1 0 1 0 1 0 0 0 1 1 0 1 0 0 0                      The extra row at the top contains the upper neighbours of the
+ * 1 1 1 0 0 1 0 1 0 1 0 1 0 0 1 0                      spins in the 6 x 6 tile. In this case these are contained in
+ * 1 0 1 0 1 0 1 0 1 0 1 0 1 0 1 0                      the last row of the lattice (periodic boundary conditions)
+ *
+ *
+ * This tile setup has the advantage that in the neighbour sum computation boundary conditions are automatically
+ * satisfied by reading in neighbour spins.
  *
  * @tparam BLOCK_SIZE_X The x dimension of the block which is loaded into shared memory
  * @tparam BLOCK_SIZE_Y The y dimension of the block which is loaded into shared memory
@@ -176,7 +195,8 @@ __device__ void loadTiles(const int ncolumns, const int nrows,
 __device__ void loadProbabilities(const float precomputed_probabilities[][5], float shared_probabilities[][5]) {
     const unsigned tidx = threadIdx.x;
     const unsigned tidy = threadIdx.y;
-    // load precomputed probabilities into shared memory.
+    // load precomputed probabilities into shared memory
+    // loops are for cases in which the block dimension is smaller than the array size
     #pragma unroll
     for(unsigned i = 0; i < 2; i += blockDim.y) {
         #pragma unroll
@@ -209,7 +229,7 @@ __device__ void loadProbabilities(const float precomputed_probabilities[][5], fl
 template<int BLOCK_DIMENSION_X, int BITXSPIN, typename INT_T, typename INT2_T>
 __device__ INT2_T computeNeighbourSum(INT2_T shared_tiles[][BLOCK_DIMENSION_X + 2],
                                       const int tidx, const int tidy, const int shift_left) {
-    // three nearest neighbors
+    // read in nearest neighbours from the loaded in sub lattice (tile)
     INT2_T upper_neighbor  = shared_tiles[    tidy][1 + tidx];
     INT2_T center_neighbor = shared_tiles[1 + tidy][1 + tidx];
     INT2_T lower_neighbor  = shared_tiles[2 + tidy][1 + tidx];
@@ -491,7 +511,7 @@ void readFromFile(unsigned long long* d_spins,
     }
     fclose(fp);
     CHECK_CUDA(cudaMemcpy(d_spins, h_spins, total_number_of_words * sizeof(*h_spins),
-                          cudaMemcpyHostToDevice));
+                          cudaMemcpyHostToDevice))
     free(h_spins);
 }
 
@@ -514,7 +534,7 @@ static void dumpLattice(const char* filename,
 
     unsigned long long *v_h = (unsigned long long *) malloc(total_number_of_words * sizeof(*v_h));
     CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h),
-                          cudaMemcpyDeviceToHost));
+                          cudaMemcpyDeviceToHost))
 
     unsigned long long *black_h = v_h;
     unsigned long long *white_h = v_h + total_number_of_words / 2;
