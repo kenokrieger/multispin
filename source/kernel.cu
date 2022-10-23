@@ -229,7 +229,7 @@ int main(int argc, char **argv) {
 
     if (read_from_file) {
         std::cout << "Reading in lattice configuration..." << std::endl;
-        readFromFile(d_spins, import_file.c_str(), params.lattice_height,
+        readFromFileBinary(d_spins, import_file.c_str(), params.lattice_height,
                      params.words_per_row, params.total_words);
     } else {
         // words_per_row / 2 because words two 64 bit words are compacted into
@@ -264,11 +264,12 @@ int main(int argc, char **argv) {
             mag_file.open("magnetisation_" + std::to_string(iteration) + ".dat");
         }
 
-        if (iteration % 10000000 == 0 && iteration) {
+        if (iteration % 1000000 == 0 && iteration) {
             char fname[256];
-            snprintf(fname, sizeof(fname), "iteration_%d.dat", iteration);
-            dumpLattice(fname, params.lattice_height, params.words_per_row,
+            snprintf(fname, sizeof(fname), "iteration_%d.bin", iteration);
+            dumpLatticeBinary(fname, params.lattice_height, params.words_per_row,
                         params.total_words, d_spins);
+            snprintf(fname, sizeof(fname), "iteration_%d.dat", iteration);
         }
         if (flag_terminate) {
             std::cout << "Received keyboard interrupt, exiting..." << std::endl;
@@ -285,7 +286,7 @@ int main(int argc, char **argv) {
     std::cout << "Updates per ns: " << spin_updates_per_nanosecond << std::endl;
     if (dump_to_file) {
         std::cout << "Saving lattice state for reuse..." << std::endl;
-        dumpLattice(export_file.c_str(), params.lattice_height, params.words_per_row,
+        dumpLatticeBinary(export_file.c_str(), params.lattice_height, params.words_per_row,
                     params.total_words, d_spins);
     }
     FILE *fp = fopen(config_filename, "a");

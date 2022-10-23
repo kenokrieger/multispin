@@ -517,6 +517,129 @@ void readFromFile(unsigned long long* d_spins,
 
 
 /**
+ * @brief Read an existing lattice state from a binary file.
+ *
+ * Read in the spins stored in 32 bit words with little endian.
+ *
+ * @param d_spins  A pointer to the device array of spins to read in from the file
+ * @param filename  The name of the file containing the lattice state
+ * @param nrows  The number of rows in the lattice configuration
+ * @param ncolumns  The number of columns in the lattice configuration
+ * @param total_number_of_words  The total number of computer words storing the lattice configuration
+ *
+ */
+void readFromFileBinary(unsigned long long* d_spins,
+                  const char* filename,
+                  const size_t nrows,
+                  const size_t ncolumns,
+                  const size_t total_number_of_words) {
+    auto ONE = static_cast<unsigned long long>(1);
+
+    unsigned long long *h_spins = (unsigned long long *) malloc(total_number_of_words * sizeof(*h_spins));
+    memset(h_spins, 0, total_number_of_words * sizeof(*h_spins));
+
+    unsigned long long *h_black_tiles = h_spins;
+    unsigned long long *h_white_tiles = h_spins + total_number_of_words / 2;
+
+    FILE *fp;
+    fp = fopen(filename, "rb");
+
+    // the buffer needs to be exactly of 2 * 8 * sizeof(*h_spins) / BIT_X_SPIN
+    // for the read in to be correct
+    int32_t buffer = 0;
+    int bits_read_from_buffer = 0;
+    for(int i = 0; i < nrows; i++) {
+        for(int j = 0; j < ncolumns; j++) {
+            fread(&buffer,sizeof(buffer),1,fp);
+            bits_read_from_buffer = 0;
+            // the words are stored in little endian meaning
+            // the first spin we want to retrieve is located
+            // on the right
+
+            // DEBUG 1: Reverse try reverse bit order
+            for(int k = 0; k < 8 * sizeof(*h_spins); k += BIT_X_SPIN) {
+                if (i & 1) {
+                    if ((buffer >> (31 - bits_read_from_buffer)) & 1)
+                        h_white_tiles[i * ncolumns + j] |= ONE << k;
+                    if ((buffer >> (31 - bits_read_from_buffer - 1)) & 1)
+                        h_black_tiles[i * ncolumns + j] |= ONE << k;
+                } else {
+                    if ((buffer >> (31 - bits_read_from_buffer)) & 1)
+                        h_black_tiles[i * ncolumns + j] |= ONE << k;
+                    if ((buffer >> (31 - bits_read_from_buffer - 1)) & 1)
+                        h_white_tiles[i * ncolumns + j] |= ONE << k;
+                }
+                bits_read_from_buffer += 2;
+            }
+        }
+    }
+    fclose(fp);
+    CHECK_CUDA(cudaMemcpy(d_spins, h_spins, total_number_of_words * sizeof(*h_spins),
+                          cudaMemcpyHostToDevice))
+    free(h_spins);
+}
+
+
+/**
+ * @brief Save the current lattice state to a binary file
+ *
+ * Caution: When reading in the file remember that the spins are stored
+ *          in a 4 byte word saved in little endian!
+ *
+ * @param filename  The name of the file to save the lattice to
+ * @param nrows  The number of rows in the lattice
+ * @param ncolumns  The number of columns in the lattice
+ * @param total_number_of_words  The total number of computer words storing the lattice configuration
+ * @param d_spins  The pointer to the array storing the spins
+ *
+ */
+static void dumpLatticeBinary(const char* filename,
+                        const int nrows,
+                        const size_t ncolumns,
+                        const size_t total_number_of_words,
+                        const unsigned long long *d_spins) {
+    unsigned long long *v_h = (unsigned long long *) malloc(total_number_of_words * sizeof(*v_h));
+    CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h),
+                          cudaMemcpyDeviceToHost))
+
+    unsigned long long *black_h = v_h;
+    unsigned long long *white_h = v_h + total_number_of_words / 2;
+
+    FILE *fp = fopen(filename, "wb");
+    // the buffer needs to be exactly of 2 * 8 * sizeof(*h_spins) / BIT_X_SPIN
+    // for the output to be correct
+    int32_t buffer = 0;
+    int NBIT = 32;
+    int times_written_to_buffer = 0;
+
+    for(int i = 0; i < nrows; i++) {
+        for(int j = 0; j < ncolumns; j++) {
+            unsigned long long b = black_h[i * ncolumns + j];
+            unsigned long long w = white_h[i * ncolumns + j];
+
+            for(int k = 0; k < 8 * sizeof(*v_h); k += BIT_X_SPIN) {
+                int32_t black_spin = (b >> k) & 0xF;
+                int32_t white_spin = (w >> k) & 0xF;
+                if (i & 1) {
+                    buffer |= white_spin << (NBIT - times_written_to_buffer - 1);
+                    buffer |= black_spin << (NBIT - times_written_to_buffer - 2);
+                } else {
+                    buffer |= black_spin << (NBIT - times_written_to_buffer - 1);
+                    buffer |= white_spin << (NBIT - times_written_to_buffer - 2);
+                }
+                times_written_to_buffer += 2;
+            }
+            fwrite(&buffer,sizeof(buffer),1,fp);
+            buffer = 0;
+            times_written_to_buffer = 0;
+        }
+    }
+    fclose(fp);
+    free(v_h);
+}
+
+
+/**
  * @brief Save the current lattice state to a file
  *
  * @param filename  The name of the file to save the lattice to
@@ -531,7 +654,6 @@ static void dumpLattice(const char* filename,
                         const size_t ncolumns,
                         const size_t total_number_of_words,
                         const unsigned long long *d_spins) {
-
     unsigned long long *v_h = (unsigned long long *) malloc(total_number_of_words * sizeof(*v_h));
     CHECK_CUDA(cudaMemcpy(v_h, d_spins, total_number_of_words * sizeof(*v_h),
                           cudaMemcpyDeviceToHost))
