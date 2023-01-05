@@ -128,14 +128,14 @@ void initialiseArrays(dim3 blocks, dim3 threads_per_block,
  * Example:
  *
  * Source lattice [11 x 16]                             Imported tile [6 x 6]
- *                   # # # # # # # # <- Tile Border       1 0 1 0 1 0   <- extra rows and columns to take
- * 1 0 0 0 1 0 1 1 0 # 0 1 1 0 1 0 #                    0 0 1 1 0 1 0 1    care of boundary conditions
- * 0 1 0 0 1 0 0 1 0 # 1 0 1 0 0 1 #                    0 1 0 1 0 0 1 0
- * 0 0 1 0 1 0 1 0 1 # 1 0 1 0 0 1 #                    1 1 0 1 0 0 1 0
- * 1 1 1 0 0 1 0 1 1 # 0 0 1 0 1 0 #                    1 0 0 1 0 1 0 1
- * 1 0 0 1 1 0 1 0 1 # 1 1 1 0 1 0 #                    1 1 1 1 0 1 0 1
- * 1 1 1 0 1 0 1 1 0 # 0 1 1 0 1 1 #                    0 0 1 1 0 1 1 1
- * 1 1 0 1 0 1 0 0 0 # # # # # # # #                      1 0 1 1 1 1
+ *                   |-------------| <- Tile Border       1 0 1 0 1 0   <- extra rows and columns to take
+ * 1 0 0 0 1 0 1 1 0 | 0 1 1 0 1 0 |                    0 0 1 1 0 1 0 1    care of boundary conditions
+ * 0 1 0 0 1 0 0 1 0 | 1 0 1 0 0 1 |                    0 1 0 1 0 0 1 0
+ * 0 0 1 0 1 0 1 0 1 | 1 0 1 0 0 1 |                    1 1 0 1 0 0 1 0
+ * 1 1 1 0 0 1 0 1 1 | 0 0 1 0 1 0 |                    1 0 0 1 0 1 0 1
+ * 1 0 0 1 1 0 1 0 1 | 1 1 1 0 1 0 |                    1 1 1 1 0 1 0 1
+ * 1 1 1 0 1 0 1 1 0 | 0 1 1 0 1 1 |                    0 0 1 1 0 1 1 1
+ * 1 1 0 1 0 1 0 0 0 |-------------|                      1 0 1 1 1 1
  * 0 1 0 1 1 0 0 1 1 0 1 0 1 1 1 1
  * 0 1 0 1 0 1 0 0 0 1 1 0 1 0 0 0                      The extra row at the top contains the upper neighbours of the
  * 1 1 1 0 0 1 0 1 0 1 0 1 0 0 1 0                      spins in the 6 x 6 tile. In this case these are contained in
@@ -555,8 +555,6 @@ void readFromFileBinary(unsigned long long* d_spins,
             // the words are stored in little endian meaning
             // the first spin we want to retrieve is located
             // on the right
-
-            // DEBUG 1: Reverse try reverse bit order
             for(int k = 0; k < 8 * sizeof(*h_spins); k += BIT_X_SPIN) {
                 if (i & 1) {
                     if ((buffer >> (31 - bits_read_from_buffer)) & 1)

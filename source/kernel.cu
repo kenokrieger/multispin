@@ -264,12 +264,12 @@ int main(int argc, char **argv) {
             mag_file.open("magnetisation_" + std::to_string(iteration) + ".dat");
         }
 
-        if (iteration % 1000000 == 0 && iteration) {
-            char fname[256];
-            snprintf(fname, sizeof(fname), "iteration_%d.bin", iteration);
-            dumpLatticeBinary(fname, params.lattice_height, params.words_per_row,
-                        params.total_words, d_spins);
-            snprintf(fname, sizeof(fname), "iteration_%d.dat", iteration);
+        if (iteration % 30000000 == 0 && iteration) {
+            FILE *f = fopen("backup.info", "w");
+            fprintf(f, "Backup of iteration %d\n", iteration);
+            fclose(f);
+            dumpLatticeBinary("lattice_backup.bin", params.lattice_height, params.words_per_row,
+                              params.total_words, d_spins);
         }
         if (flag_terminate) {
             std::cout << "Received keyboard interrupt, exiting..." << std::endl;
