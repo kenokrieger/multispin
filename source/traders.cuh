@@ -361,7 +361,7 @@ void precomputeProbabilities(float* probabilities, const float market_coupling, 
     for (int spin = 0; spin < 2; spin++) {
         for (int idx = 0; idx < 5; idx++) {
             int neighbour_sum = 2 * idx - 4;
-            float field = reduced_j * neighbour_sum + market_coupling * ((spin) ? 1 : -1);
+            float field = reduced_j * neighbour_sum - market_coupling * (-1 + 2 * spin);
             h_probabilities[spin][idx] = 1.0 / (1.0 + exp(field));
         }
     }
@@ -713,7 +713,7 @@ float update(int iteration,
     countSpins(reduce_blocks, params.total_words, d_black_tiles, d_sum, &spins_up, &spins_down);
     double magnetisation = static_cast<double>(spins_up) - static_cast<double>(spins_down);
     float reduced_magnetisation = magnetisation / static_cast<double>(params.lattice_width * params.lattice_height);
-    float market_coupling = -params.reduced_alpha * fabs(reduced_magnetisation);
+    float market_coupling = params.reduced_alpha * fabs(reduced_magnetisation);
     precomputeProbabilities(d_probabilities, market_coupling, params.reduced_j, params.pitch);
 
     updateStrategies<BLOCK_DIMENSION_X_DEFINE, BLOCK_DIMENSION_Y_DEFINE, BIT_X_SPIN, C_BLACK, unsigned long long>
